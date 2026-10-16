@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { build, buildBinary, type PlistValue } from "plist";
+import { binaryPlistNumberLiterals } from "./PlistNumberLiterals.js";
 import { decodeKeyedArchiveBytes } from "./KeyedArchiveReader.js";
 import { deeplyNestedXmlPlist } from "../../../tests/fixtures/keyedArchiveXmlNesting.js";
 
@@ -435,5 +436,77 @@ describe("XML plist nesting preflight", () => {
     expect(() =>
       decodeKeyedArchiveBytes(deeplyNestedArchive(127), selection),
     ).toThrow(new RangeError("Plist exceeds 128 nesting levels"));
+  });
+});
+
+/** Marker 0x13: an 8-byte binary-plist integer. */
+const plistInteger64 = (value: bigint): Buffer => {
+  const bytes = Buffer.alloc(9);
+  bytes[0] = 0x13;
+  bytes.writeBigInt64BE(value, 1);
+  return bytes;
+};
+/** Marker 0x14: the 16-byte integer Foundation writes past the 64-bit range. */
+const plistWideInteger = (value: bigint): Buffer => {
+  const bytes = Buffer.alloc(17);
+  bytes[0] = 0x14;
+  // Big-endian 128-bit: the high word comes first.
+  bytes.writeBigUint64BE((value >> 64n) & 0xffffffffffffffffn, 1);
+  bytes.writeBigUint64BE(value & 0xffffffffffffffffn, 9);
+  return bytes;
+};
+
+describe("binary plist wide integers", () => {
+  const literals = (...objects: Buffer[]) =>
+    binaryPlistNumberLiterals(binaryPlist(objects));
+
+  it("records a 16-byte integer instead of marking the archive incomplete", () => {
+    const observed = literals(plistWideInteger(18446744073709551615n));
+    expect(observed.incomplete).toBe(false);
+    expect(observed.unsafeIntegerLiterals).toBe(1);
+    expect([...observed.integers.values()].map((set) => [...set])).toEqual([
+      ["18446744073709551615"],
+    ]);
+  });
+
+  it("keeps an 8-byte integer exact beside a 16-byte integer", () => {
+    const observed = literals(
+      plistInteger64(9223372036854775807n),
+      plistWideInteger(18446744073709551615n),
+    );
+    expect(observed.incomplete).toBe(false);
+    expect(observed.unsafeIntegerLiterals).toBe(2);
+    expect(
+      [...observed.integers.values()].flatMap((set) => [...set]).sort(),
+    ).toEqual(["18446744073709551615", "9223372036854775807"]);
+  });
+
+  it("keeps an integer width the format does not define incomplete", () => {
+    // Marker 0x15 declares a 32-byte integer, which is not a binary-plist width.
+    expect(
+      literals(Buffer.concat([Buffer.from([0x15]), Buffer.alloc(32)]))
+        .incomplete,
+    ).toBe(true);
+  });
+
+  it("keeps exact decimals for other integers when a 16-byte one is present", () => {
+    const result = decodeKeyedArchiveBytes(
+      keyedRoot([
+        plistArray([9, 10]),
+        plistInteger64(9223372036854775807n),
+        plistWideInteger(18446744073709551615n),
+      ]),
+      { root: "root", offset: 0, limit: 10 },
+    );
+    expect(result.archive_format).toBe("binary-plist");
+    // The 16-byte integer no longer disables exact decimals for the archive.
+    expect(result.limitations).not.toContain(
+      "Original archive number metadata could not be completely observed; decoded numbers may lose integer precision and exact integer/real association is unavailable.",
+    );
+    const objects = result.objects.map(({ value }) => value);
+    expect(objects).toContainEqual({
+      $plist_type: "integer",
+      decimal: "9223372036854775807",
+    });
   });
 });

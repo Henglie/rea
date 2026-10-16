@@ -120,6 +120,11 @@ export const xmlPlistNumberLiterals = (xml: string): PlistNumberLiterals => {
   return output.result();
 };
 
+/** A signed 128-bit integer, the widest binary-plist integer Foundation writes. */
+const wideInteger = (view: DataView, offset: number): bigint =>
+  view.getBigInt64(offset) * 18446744073709551616n +
+  view.getBigUint64(offset + 8);
+
 /** Observe bounded binary number markers without changing primary decode acceptance. */
 export const binaryPlistNumberLiterals = (
   bytes: Buffer,
@@ -161,6 +166,11 @@ export const binaryPlistNumberLiterals = (
     if (offset + 1 + width > offsetTable) return output.result(true);
     if (type === 1 && width === 8)
       output.integer(view.getBigInt64(offset + 1).toString());
+    // Foundation writes a 16-byte integer for a value that does not fit in 64
+    // bits. Reading it keeps this archive's number metadata complete, instead of
+    // disabling exact decimals for every other large integer in the file.
+    else if (type === 1 && width === 16)
+      output.integer(wideInteger(view, offset + 1).toString());
     else if (type === 1 && width > 4) return output.result(true);
     else if (type === 2 && width === 4)
       output.real(view.getFloat32(offset + 1));
