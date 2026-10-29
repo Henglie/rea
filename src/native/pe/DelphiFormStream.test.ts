@@ -557,3 +557,39 @@ describe("Delphi form failure surface", () => {
     expect(root.unknown?.bytes_hex).toContain("deadbeef");
   });
 });
+
+describe("Delphi form partial collections", () => {
+  it("keeps collection items when a nested list stops", () => {
+    // A collection whose second item has a list-valued property that ends
+    // mid-value: the item and its partial list must stay on the collection
+    // property, and the earlier item must not disappear.
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_(
+          "Columns",
+          collection(
+            collectionItem(int8(0), property_("Width", int32(64))),
+            collectionItem(
+              int8(1),
+              property_(
+                "Values",
+                Buffer.concat([bytes(1), int32(7), bytes(4, 0x11, 0x22)]),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+    const root = rootOf(payload.subarray(0, payload.length - 3));
+    const property = root.properties[0];
+    expect(property?.value_type).toBe("vaCollection");
+    expect(property?.value.kind).toBe("collection");
+    if (property?.value.kind !== "collection")
+      throw new Error("Expected a collection");
+    expect(property.value.items).toHaveLength(2);
+    expect(property.value.items[0]?.properties[0]?.name.text).toBe("Width");
+    const values = property.value.items[1]?.properties[0];
+    expect(values?.name.text).toBe("Values");
+    expect(values?.value.kind).toBe("list");
+  });
+});

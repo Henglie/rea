@@ -159,7 +159,7 @@ const textSchema = z.strictObject({
  * boundary projects.
  */
 const boundedChild = z
-  .object({})
+  .looseObject({})
   .describe(
     "A nested form object, property, collection item or value; its members follow the same shape.",
   );

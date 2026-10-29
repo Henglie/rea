@@ -102,14 +102,14 @@ export const DELPHI_FORM_LIMITATIONS: readonly string[] = [
 class StreamEnd extends Error {}
 
 /**
- * A `vaList` whose later entries stopped decoding. The entries decoded before
- * the stop travel with the error so the enclosing property keeps them as a
- * partial list instead of a generic unknown.
+ * A `vaList` or `vaCollection` whose later entries stopped decoding. The value
+ * built so far travels with the error so the enclosing property keeps it as a
+ * partial value instead of a generic unknown.
  */
-class StoppedList extends StreamEnd {
+class StoppedValue extends StreamEnd {
   constructor(
     message: string,
-    readonly partial: Extract<DelphiFormValue, { kind: "list" }>,
+    readonly partial: DelphiFormValue,
   ) {
     super(message);
   }
@@ -490,8 +490,8 @@ function readValue(
           if (!(error instanceof StreamEnd)) throw error;
           // Entries decoded before the stop stay evidence. A stopped nested
           // list keeps its own partial items as the last entry of this one.
-          if (error instanceof StoppedList) items.push(error.partial);
-          throw new StoppedList(error.message, {
+          if (error instanceof StoppedValue) items.push(error.partial);
+          throw new StoppedValue(error.message, {
             kind: "list",
             items,
             location: partialLocation(),
@@ -536,7 +536,58 @@ function readValue(
         const properties: DelphiFormProperty[] = [];
         for (;;) {
           if (stream.peek() === 0) break;
-          properties.push(readProperty(stream, budget, codePage, depth));
+          const propertyAt = stream.position;
+          spend(budget, "properties");
+          const name = readShortString(stream, codePage);
+          let ordinal: number | null = null;
+          try {
+            ordinal = stream.byte();
+            const value = readValue(
+              stream,
+              ordinal,
+              budget,
+              codePage,
+              depth + 1,
+            );
+            properties.push({
+              name,
+              value_type: valueTypeName(ordinal),
+              value,
+              location: range(propertyAt, stream.position),
+            });
+          } catch (error) {
+            if (error instanceof StoppedForm) throw error;
+            if (!(error instanceof StreamEnd)) throw error;
+            // Keep the nested partial (for example a stopped vaList) on the
+            // property that declared it, then stop the collection with the
+            // items decoded so far instead of collapsing them to one value.
+            properties.push({
+              name,
+              value_type: ordinal === null ? "unknown" : valueTypeName(ordinal),
+              value:
+                error instanceof StoppedValue
+                  ? error.partial
+                  : {
+                      kind: "unknown",
+                      reason: error.message,
+                      ...hexOf(
+                        stream.bytes.subarray(stream.position, stream.end),
+                      ),
+                      location: range(stream.position, stream.end),
+                    },
+              location: range(propertyAt, stream.end),
+            });
+            items.push({
+              position,
+              properties,
+              location: range(itemAt, stream.position),
+            });
+            throw new StoppedValue(error.message, {
+              kind: "collection",
+              items,
+              location: range(at, stream.position),
+            });
+          }
         }
         stream.byte();
         items.push({
@@ -559,25 +610,6 @@ function readValue(
         `Unsupported value type ${valueTypeName(ordinal)} (${String(ordinal)}).`,
       );
   }
-}
-
-function readProperty(
-  stream: Stream,
-  budget: Budget,
-  codePage: string,
-  depth: number,
-): DelphiFormProperty {
-  spend(budget, "properties");
-  const at = stream.position;
-  const name = readShortString(stream, codePage);
-  const ordinal = stream.byte();
-  const value = readValue(stream, ordinal, budget, codePage, depth);
-  return {
-    name,
-    value_type: valueTypeName(ordinal),
-    value,
-    location: range(at, stream.position),
-  };
 }
 
 /** `BeginComponent`: optional filer flags, then class name and component name. */
@@ -627,6 +659,7 @@ function readObject(
     for (;;) {
       if (stream.peek() === 0) break;
       const propertyAt = stream.position;
+      spend(budget, "properties");
       const name = readShortString(stream, codePage);
       // The type marker can itself be truncated after a complete name; the
       // partial-property path below must still retain the observed name.
@@ -651,7 +684,7 @@ function readObject(
           name,
           value_type: ordinal === null ? "unknown" : valueTypeName(ordinal),
           value:
-            error instanceof StoppedList
+            error instanceof StoppedValue
               ? error.partial
               : {
                   kind: "unknown",
