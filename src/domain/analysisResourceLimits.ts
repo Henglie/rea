@@ -14,6 +14,17 @@ export const DEFAULT_ASAR_MAX_HEADER_BYTES = 16 * 1024 * 1024;
  */
 export const MAXIMUM_ASAR_MAX_HEADER_BYTES = 256 * 1024 * 1024;
 
+/** Native function-matching representation admitted when the setting is unset. */
+export const DEFAULT_NATIVE_MATCHING_REPRESENTATION_BYTES = 96 * 1024 * 1024;
+
+/**
+ * Largest configurable matching admission. This is an REA policy ceiling, not
+ * a claim about host capacity: the allowance approximates the heap
+ * representation matching retains, and peak heap during a request can exceed
+ * it. A lower value only refuses more requests, so the setting has no floor.
+ */
+export const MAXIMUM_NATIVE_MATCHING_REPRESENTATION_BYTES = 1024 * 1024 * 1024;
+
 /** Default absolute deadline for Ghidra import, analysis, bridge, and readiness. */
 export const DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS = 330_000;
 
@@ -21,10 +32,27 @@ export const DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS = 330_000;
 export const DEFAULT_HOPPER_STARTUP_TIMEOUT_MS = 120_000;
 
 /**
+ * Default wall-clock budget for one Hopper caller-scan reconciliation, in
+ * milliseconds. The first page always runs; a later page is not requested
+ * after this budget.
+ */
+export const DEFAULT_HOPPER_CALLER_SCAN_BUDGET_MS = 2_000;
+
+/** Smallest caller-scan budget. Zero is not a deadline. */
+export const MINIMUM_HOPPER_CALLER_SCAN_BUDGET_MS = 1;
+
+/**
  * Largest delay Node schedules exactly. Delays above this signed 32-bit
  * boundary become a 1 ms timer, so startup and swiftc timeouts stop here.
  */
 export const MAX_PROVIDER_STARTUP_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Largest caller-scan budget Node can schedule exactly. A delay above this
+ * signed 32-bit bound becomes 1 ms, so the setting stops here.
+ */
+export const MAXIMUM_HOPPER_CALLER_SCAN_BUDGET_MS =
+  MAX_PROVIDER_STARTUP_TIMEOUT_MS;
 
 /**
  * Ghidra 12.1.4 converts whole seconds to a signed int millisecond delay.

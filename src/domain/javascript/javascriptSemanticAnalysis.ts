@@ -420,6 +420,7 @@ export const analyzeParsedJavaScriptSemantics = (
 export function* analyzeParsedJavaScriptSemanticsSteps(
   file: ParsedJavaScriptSource,
   staticImportResolutionMode: JavaScriptModuleResolutionMode = "import",
+  expressionNodeBudget?: number,
 ): Generator<void, JavaScriptSemanticIr> {
   const state = createState(file.program, staticImportResolutionMode);
   yield* collectDefinitionsSteps(file.program, state);
@@ -447,6 +448,14 @@ export function* analyzeParsedJavaScriptSemanticsSteps(
     callables,
     references,
     parserPartial,
+    expressionNodeBudget,
+  );
+  const coverage = semanticCoverage(
+    parserPartial,
+    [
+      ...new Set([...state.valueResourceLimits, ...state.getterResourceLimits]),
+    ].sort(),
+    [...state.returnedReferenceWidenings].map(range),
   );
   return {
     schema: "JavaScriptSemanticIR",
@@ -456,17 +465,15 @@ export function* analyzeParsedJavaScriptSemanticsSteps(
     references,
     moduleLinks,
     ...derived,
-    coverage: semanticCoverage(
-      parserPartial,
-      [
-        ...new Set([
-          ...state.valueResourceLimits,
-          ...state.getterResourceLimits,
-        ]),
-      ].sort(),
-      [...state.returnedReferenceWidenings].map(range),
-    ),
+    coverage: derived.expressionFlowsTruncated
+      ? { ...coverage, status: "partial", omittedCount: null }
+      : coverage,
     limitations: [
+      ...(derived.expressionFlowsTruncated
+        ? [
+            "The offered semantic node capacity bounded expression dependencies; omitted influence remains unknown.",
+          ]
+        : []),
       ...(state.valueResourceLimits.has("alias-selections")
         ? [semanticResourceLimitReason("alias-selections")]
         : []),
@@ -835,28 +842,9 @@ const resolveGlobalAliasFact = (
   return openGlobalFact(name);
 };
 
-/**
- * Proven Electron export path segments for call and construction roots, keyed by
- * root offset. Only proven Electron origins are present; callers must not
- * infer an Electron export from an absent entry or familiar local name.
- */
-export const classifyParsedJavaScriptElectronBindings = (
-  file: ParsedJavaScriptSource,
-): ReadonlyMap<number, readonly string[]> =>
-  completeSemanticSteps(classifyParsedJavaScriptElectronBindingsSteps(file));
-
-/** Resolve Electron aliases while yielding during lexical and AST scans. */
-export function* classifyParsedJavaScriptElectronBindingsSteps(
-  file: ParsedJavaScriptSource,
-): Generator<void, ReadonlyMap<number, readonly string[]>> {
-  const state = createState(file.program);
-  yield* collectDefinitionsSteps(file.program, state);
-  return (yield* indexJavaScriptElectronIdentitySteps(file.program, state))
-    .bindings;
-}
-
 /** Shared lexical identity and visible-write proof for direct and wrapped calls. */
 export interface JavaScriptElectronIdentity {
+  /** Proven export paths keyed by call/construction root offset; absence is unknown. */
   readonly bindings: ReadonlyMap<number, readonly string[]>;
   readonly intactExport: (path: readonly (string | null)[]) => boolean;
   readonly exportPath: (root: t.Node) => readonly string[] | undefined;
