@@ -7,10 +7,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as ownership from "../../../../src/process/ProcessOwnership.js";
 
-import type {
-  HopperStartupDiagnostic,
-  HopperStartupFailureCode,
+import {
+  DEFAULT_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+  HOPPER_DEMO_DIALOG_TIMEOUT_SETTING,
+  MAXIMUM_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+  MINIMUM_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+  type HopperStartupDiagnostic,
+  type HopperStartupFailureCode,
 } from "../../../../src/domain/hopperStartupFailure.js";
+import { projectAnalysisError } from "../../../../src/domain/analysisErrorProjection.js";
+import { HopperProcessError } from "../../../../src/domain/hopperErrors.js";
+import { analysisErrorProjectionSchema } from "../../../../src/contracts/errorSchemas.js";
 import {
   runLinuxPrivateDisplayProbe,
   selectLinuxPrivateDisplayStrategy,
@@ -149,10 +156,62 @@ describe("Hopper demo dialog timeout outcomes", () => {
         configured_timeout: { ms: 25_000 },
         requested_timeout: { ms: 500 },
         invalid_timeout: {
-          code: 73,
+          code: 82,
           reason: "invalid_dialog_timeout",
+          dialog_timeout: {
+            setting: HOPPER_DEMO_DIALOG_TIMEOUT_SETTING,
+            value: "-5",
+            source: "setting",
+            minimum_ms: MINIMUM_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+            maximum_ms: MAXIMUM_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+            default_ms: DEFAULT_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
+          },
+        },
+        watcher_no_window: {
+          code: 81,
+          reason: "demo_dialog_absent",
+          elapsed_ms: 1_000,
+        },
+        watcher_hopper_window_without_dialog: {
+          code: 76,
+          reason: "unsupported_demo_dialog",
+          elapsed_ms: 1_000,
+        },
+        watcher_dialog_after_legacy_limit: {
+          dialog: 10,
+          elapsed_ms: DEFAULT_HOPPER_DEMO_DIALOG_TIMEOUT_MS + 100,
+          legacy_limit_ms: DEFAULT_HOPPER_DEMO_DIALOG_TIMEOUT_MS,
         },
       });
+      const timeout = JSON.parse(result.stdout).invalid_timeout.dialog_timeout;
+      const parsed = parseLinuxPrivateDisplayDiagnostic(
+        `${LINUX_PRIVATE_DISPLAY_DIAGNOSTIC_PREFIX}${JSON.stringify({
+          ...diagnostic({
+            status: "error",
+            operation: "launch",
+            reason: "invalid_dialog_timeout",
+            failure_code: "invalid_dialog_timeout",
+          }),
+          dialog_timeout: timeout,
+        })}\n`,
+      );
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok || parsed.value.status !== "error") return;
+      const projected = projectAnalysisError(
+        new HopperProcessError(82, { diagnostic: parsed.value }),
+      );
+      expect(projected).toMatchObject({
+        code: "provider_unavailable",
+        details: {
+          failure_code: "invalid_dialog_timeout",
+          exit_code: 82,
+          diagnostics: { dialog_timeout: timeout },
+        },
+      });
+      expect(projected.details).not.toHaveProperty("launch_rejection");
+      expect(analysisErrorProjectionSchema.safeParse(projected).success).toBe(
+        true,
+      );
     },
   );
 });
