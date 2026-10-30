@@ -59,6 +59,11 @@ const failures = [
     "x11_socket_directory_unusable",
     "REA cannot use the host X11 socket directory for a private display. Run rea doctor --provider hopper for exact mount and namespace diagnostics.",
   ],
+  [
+    81,
+    "demo_dialog_absent",
+    "Hopper passed launcher authentication but did not present a registration dialog within the wait window. If this host is slow, raise REA_HOPPER_DEMO_DIALOG_TIMEOUT_MS and retry; otherwise complete Hopper setup or close stale sessions and retry.",
+  ],
 ] as const;
 
 export type HopperStartupFailureCode = (typeof failures)[number][1];

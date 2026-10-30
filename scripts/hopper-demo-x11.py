@@ -35,6 +35,9 @@ UNEXPECTED_DISPLAY_GEOMETRY = 77
 X11_INPUT_FAILED = 78
 RUNTIME_DEPENDENCY_UNAVAILABLE = 79
 X11_SOCKET_DIRECTORY_UNUSABLE = 80
+DEMO_DIALOG_ABSENT = 81
+DEFAULT_DIALOG_TIMEOUT_MS = 10_000
+DIALOG_TIMEOUT_ENV = "REA_HOPPER_DEMO_DIALOG_TIMEOUT_MS"
 DIAGNOSTIC_PREFIX = "REA_X11_DIAGNOSTIC="
 X11_SOCKET_DIRECTORY = Path("/tmp/.X11-unix")
 class AdapterFailure(Exception):
@@ -111,6 +114,39 @@ class XWindowAttributes(ctypes.Structure):
     ]
 
 
+def positive_timeout(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "dialog timeout must be a positive integer"
+        ) from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            "dialog timeout must be a positive integer"
+        )
+    return parsed
+
+
+def configured_dialog_timeout_ms(requested: int | None) -> int:
+    if requested is not None:
+        return requested
+    configured = os.environ.get(DIALOG_TIMEOUT_ENV)
+    if configured is None:
+        return DEFAULT_DIALOG_TIMEOUT_MS
+    try:
+        parsed = int(configured)
+    except ValueError:
+        parsed = 0
+    if parsed < 1:
+        raise AdapterFailure(
+            INVALID_LAUNCH_COMMAND,
+            "invalid_dialog_timeout",
+            f"{DIALOG_TIMEOUT_ENV} must be a positive integer",
+        )
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--probe", action="store_true")
@@ -127,6 +163,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--xvfb", default="/usr/bin/Xvfb")
     parser.add_argument("--xauth", default="/usr/bin/xauth")
     parser.add_argument("--display-number", type=int)
+    parser.add_argument("--dialog-timeout-ms", type=positive_timeout)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -275,6 +312,29 @@ def demo_click(dialog: tuple[int, int, int, int, int]) -> tuple[int, int]:
     return x + DEMO_CLICK_LEFT, y + height - DEMO_CLICK_BOTTOM
 
 
+def classify_watch_timeout(
+    owned: bool,
+    hopper_window_observed: bool,
+) -> AdapterFailure:
+    if not owned:
+        return AdapterFailure(
+            PROCESS_OWNERSHIP_MISMATCH,
+            "process_ownership_mismatch",
+            "Hopper process ownership mismatch",
+        )
+    if hopper_window_observed:
+        return AdapterFailure(
+            UNSUPPORTED_DEMO_DIALOG,
+            "unsupported_demo_dialog",
+            "Hopper did not present a supported registration dialog",
+        )
+    return AdapterFailure(
+        DEMO_DIALOG_ABSENT,
+        "demo_dialog_absent",
+        "Hopper started without presenting a registration dialog",
+    )
+
+
 def configure_x11(x11: ctypes.CDLL, xtst: ctypes.CDLL) -> None:
     window_pointer = ctypes.POINTER(ctypes.c_ulong)
     x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
@@ -405,6 +465,7 @@ def failure_name(code: int) -> str:
         X11_INPUT_FAILED: "x11_input_failed",
         RUNTIME_DEPENDENCY_UNAVAILABLE: "runtime_dependency_unavailable",
         X11_SOCKET_DIRECTORY_UNUSABLE: "x11_socket_directory_unusable",
+        DEMO_DIALOG_ABSENT: "demo_dialog_absent",
     }[code]
 
 
@@ -752,8 +813,10 @@ def run_launch(args: argparse.Namespace) -> int:
                 "unexpected private display geometry",
             )
 
-        deadline = time.monotonic() + 10
+        timeout_ms = configured_dialog_timeout_ms(args.dialog_timeout_ms)
+        deadline = time.monotonic() + timeout_ms / 1000
         observed: list[tuple[int, int, int, int, int]] = []
+        hopper_window_observed = False
         dialog: tuple[int, int, int, int, int] | None = None
         while time.monotonic() < deadline:
             if not owner.alive():
@@ -772,21 +835,18 @@ def run_launch(args: argparse.Namespace) -> int:
                     "owned Hopper process exited",
                 )
             observed = windows(x11, display, root)
+            hopper_window_observed = hopper_window_observed or any(
+                window_title(x11, display, candidate[0]) == HOPPER_WINDOW_TITLE
+                for candidate in observed
+            )
             dialog = find_demo_dialog(x11, display, observed)
             if dialog is not None:
                 break
             time.sleep(0.1)
         else:
-            if not hopper_is_owned(leader, hopper):
-                raise AdapterFailure(
-                    PROCESS_OWNERSHIP_MISMATCH,
-                    "process_ownership_mismatch",
-                    "Hopper process ownership mismatch",
-                )
-            raise AdapterFailure(
-                UNSUPPORTED_DEMO_DIALOG,
-                "unsupported_demo_dialog",
-                "expected Hopper demo dialog not found",
+            raise classify_watch_timeout(
+                hopper_is_owned(leader, hopper),
+                hopper_window_observed,
             )
 
         assert dialog is not None

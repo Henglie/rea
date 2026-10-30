@@ -32,6 +32,13 @@ const hangingHelperPath = fileURLToPath(
 const dialogDetectionFixturePath = fileURLToPath(
   new URL("../../../fixtures/hopperDialogDetection.py", import.meta.url),
 );
+const dialogOutcomeFixturePath = fileURLToPath(
+  new URL("../../../fixtures/hopperDemoDialogOutcome.py", import.meta.url),
+);
+const pythonCommand = ["python3", "python"].find(
+  (candidate) =>
+    spawnSync(candidate, ["--version"], { stdio: "ignore" }).status === 0,
+);
 const cleanupTimeoutFixturePath = fileURLToPath(
   new URL("../../../fixtures/hopperCleanupTimeout.py", import.meta.url),
 );
@@ -95,7 +102,9 @@ const failureExit = (code: HopperStartupFailureCode): number =>
     ? 80
     : code === "runtime_dependency_unavailable"
       ? 79
-      : 70;
+      : code === "demo_dialog_absent"
+        ? 81
+        : 70;
 
 describe("Hopper demo dialog detection", () => {
   it.skipIf(process.platform !== "linux")(
@@ -111,6 +120,38 @@ describe("Hopper demo dialog detection", () => {
         dialog: [10, 20, 100, 1200, 284],
         click: [136, 362],
         wrong_parent_rejected: true,
+      });
+    },
+  );
+});
+
+describe("Hopper demo dialog timeout outcomes", () => {
+  it.skipIf(pythonCommand === undefined)(
+    "distinguishes an unowned launcher from an admitted launcher without a dialog",
+    () => {
+      const result = spawnSync(
+        pythonCommand ?? "python3",
+        [dialogOutcomeFixturePath],
+        { encoding: "utf8" },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        not_owned: { code: 74, reason: "process_ownership_mismatch" },
+        admitted_without_window: {
+          code: 81,
+          reason: "demo_dialog_absent",
+        },
+        admitted_with_window: {
+          code: 76,
+          reason: "unsupported_demo_dialog",
+        },
+        default_timeout: { ms: 10_000 },
+        configured_timeout: { ms: 25_000 },
+        requested_timeout: { ms: 500 },
+        invalid_timeout: {
+          code: 73,
+          reason: "invalid_dialog_timeout",
+        },
       });
     },
   );

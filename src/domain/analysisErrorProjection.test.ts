@@ -786,6 +786,7 @@ describe("analysis error projection: Hopper startup failures", () => {
       [78, "x11_input_failed"],
       [79, "runtime_dependency_unavailable"],
       [80, "x11_socket_directory_unusable"],
+      [81, "demo_dialog_absent"],
     ] as const;
 
     for (const [exitCode, code] of expected) {
@@ -794,9 +795,24 @@ describe("analysis error projection: Hopper startup failures", () => {
         code: "provider_unavailable",
         details: { failure_code: code, exit_code: exitCode },
       });
+      expect(projected.details).not.toHaveProperty("launch_rejection");
       expect(projected.message).toMatch(/\S/u);
       expect(JSON.stringify(projected)).not.toContain("/proc/");
     }
+  });
+
+  it("does not attribute an absent post-authentication dialog to publisher verification", () => {
+    const projected = projectAnalysisError(new HopperProcessError(81));
+    expect(projected).toMatchObject({
+      code: "provider_unavailable",
+      details: {
+        stage: "launch",
+        failure_code: "demo_dialog_absent",
+        exit_code: 81,
+      },
+    });
+    expect(projected.details).not.toHaveProperty("launch_rejection");
+    expect(projected.message).toContain("REA_HOPPER_DEMO_DIALOG_TIMEOUT_MS");
   });
 });
 
