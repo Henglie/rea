@@ -13,6 +13,15 @@ assert spec is not None and spec.loader is not None
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 
+class _Stderr:
+    def snapshot(self):
+        return (4, "")
+
+
+_failure = helper.AdapterFailure(81, "demo_dialog_absent", "missing dialog")
+if _failure.with_stderr(_Stderr()) is not _failure or _failure.stderr_bytes != 4:
+    raise SystemExit("AdapterFailure.with_stderr did not keep the startup failure")
+
 DIALOG = 10
 HOPPER = 11
 DIALOG_TITLES = {

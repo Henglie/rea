@@ -61,15 +61,15 @@ class AdapterFailure(Exception):
         self.stderr_bytes = stderr_bytes
         self.dialog_timeout = dialog_timeout
 
+    def with_stderr(self, capture: CapturedStderr) -> AdapterFailure:
+        self.stderr_bytes, _ = capture.snapshot()
+        return self
+
 
 class DemoWatchStop(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-
-    def with_stderr(self, capture: CapturedStderr) -> AdapterFailure:
-        self.stderr_bytes, _ = capture.snapshot()
-        return self
 
 
 class CapturedStderr:
