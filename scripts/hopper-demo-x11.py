@@ -813,7 +813,9 @@ def run_launch(args: argparse.Namespace) -> int:
                 "unexpected private display geometry",
             )
 
-        timeout_ms = configured_dialog_timeout_ms(args.dialog_timeout_ms)
+        timeout_ms = configured_dialog_timeout_ms(
+            getattr(args, "dialog_timeout_ms", None)
+        )
         deadline = time.monotonic() + timeout_ms / 1000
         observed: list[tuple[int, int, int, int, int]] = []
         hopper_window_observed = False
