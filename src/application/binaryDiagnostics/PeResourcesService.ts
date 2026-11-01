@@ -10,10 +10,13 @@ import {
   type PeResourceIdentity,
 } from "../../domain/native/peResources.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
-import type {
-  DelphiFormObject,
-  DelphiFormText,
-  DelphiFormValue,
+import {
+  BYTE_PRESERVING_CODE_PAGE,
+  RESOURCE_CODE_PAGES,
+  type DelphiFormObject,
+  type DelphiFormResource,
+  type DelphiFormText,
+  type DelphiFormValue,
 } from "../../domain/native/delphiForm.js";
 import { peSubjectArchitecture } from "../../domain/peMachine.js";
 import { err, ok, type Result } from "../../domain/result.js";
@@ -196,8 +199,7 @@ const validReport = (
         // source classification must agree with it, so published Evidence
         // cannot claim a declaration the artifact did not make.
         form.declared_code_page === resource.code_page &&
-        (form.declared_code_page === 0) ===
-          (form.code_page_source === "default") &&
+        codePageSourceMatches(form) &&
         within(form.signature_location) &&
         (form.prefix === null || within(form.prefix.location)) &&
         (form.root === null ||
@@ -226,24 +228,45 @@ const insideLocations = (
   );
 };
 
+/** The source classification and label must agree with the declared page. */
+const codePageSourceMatches = (form: DelphiFormResource): boolean => {
+  if (form.declared_code_page === 0) return form.code_page_source === "default";
+  const label = RESOURCE_CODE_PAGES[form.declared_code_page];
+  if (label !== undefined)
+    return form.code_page_source === "resource" && form.code_page === label;
+  return (
+    form.code_page_source === "unsupported" &&
+    form.code_page === BYTE_PRESERVING_CODE_PAGE
+  );
+};
+
 const insideValue = (
   value: DelphiFormValue,
   within: (range: { offset: number; bytes: number }) => boolean,
 ): boolean => {
   if (value.kind === "list")
-    return value.items.every((item) => insideValue(item, within));
+    return (
+      within(value.location) &&
+      value.items.every((item) => insideValue(item, within))
+    );
   if (value.kind === "set")
-    return value.names.every((item) => within(item.location));
+    return (
+      within(value.location) &&
+      value.names.every((item) => within(item.location))
+    );
   if (value.kind === "collection")
-    return value.items.every(
-      (item) =>
-        within(item.location) &&
-        item.properties.every(
-          (property) =>
-            within(property.location) &&
-            within(property.name.location) &&
-            insideValue(property.value, within),
-        ),
+    return (
+      within(value.location) &&
+      value.items.every(
+        (item) =>
+          within(item.location) &&
+          item.properties.every(
+            (property) =>
+              within(property.location) &&
+              within(property.name.location) &&
+              insideValue(property.value, within),
+          ),
+      )
     );
   return within(value.location);
 };

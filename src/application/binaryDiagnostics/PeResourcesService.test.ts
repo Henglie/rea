@@ -33,6 +33,8 @@ it.each([
   "form-points-at-icon-resource",
   "form-signature-outside-payload",
   "form-code-page-mismatch",
+  "form-code-page-source-mismatch",
+  "form-value-outside-payload",
   "mismatched-directory-path",
   "outside-directory-entry",
   "outside-directory-name",
@@ -96,6 +98,76 @@ it.each([
           root: null,
         },
       ];
+    if (problem === "form-code-page-source-mismatch") {
+      const index = report.resources.findIndex(
+        (resource) => resource.type.kind === "id" && resource.type.id === 10,
+      );
+      const resource = report.resources[index]!;
+      // 1252 is a supported page, so claiming the byte-preserving fallback
+      // misreports the provenance.
+      resource.code_page = 1252;
+      report.delphi_forms = [
+        {
+          resource_index: index,
+          signature: "TPF0",
+          version: "boVersion0",
+          signature_location: resource.payload.location,
+          prefix: null,
+          declared_code_page: 1252,
+          code_page: "latin1",
+          code_page_source: "unsupported",
+          root: null,
+        },
+      ];
+    }
+    if (problem === "form-value-outside-payload") {
+      const index = report.resources.findIndex(
+        (resource) => resource.type.kind === "id" && resource.type.id === 10,
+      );
+      const resource = report.resources[index]!;
+      const payload = resource.payload.location;
+      report.delphi_forms = [
+        {
+          resource_index: index,
+          signature: "TPF0",
+          version: "boVersion0",
+          signature_location: payload,
+          prefix: null,
+          declared_code_page: resource.code_page,
+          code_page: "windows-1252",
+          code_page_source: resource.code_page === 0 ? "default" : "resource",
+          root: {
+            location: payload,
+            flags: [],
+            child_position: null,
+            class_name: null,
+            component_name: null,
+            properties: [
+              {
+                name: {
+                  text: "Items",
+                  bytes_hex: "",
+                  code_page: "windows-1252",
+                  location: payload,
+                },
+                value_type: "vaList",
+                value: {
+                  kind: "list",
+                  items: [],
+                  location: {
+                    offset: payload.offset,
+                    bytes: payload.bytes + 4,
+                  },
+                },
+                location: payload,
+              },
+            ],
+            children: [],
+            unknown: null,
+          },
+        },
+      ];
+    }
     if (problem === "mismatched-directory-path")
       report.directories[1]!.path = [];
     if (problem === "outside-directory-entry")

@@ -13,7 +13,11 @@ import { assertArtifactReadActive } from "../../artifacts/ArtifactFileOperation.
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import type { ArtifactLimitBoundary } from "../../domain/artifactOperationError.js";
 import { jsonParts } from "../../domain/jsonSerialization.js";
-import type { DelphiFormResource } from "../../domain/native/delphiForm.js";
+import {
+  BYTE_PRESERVING_CODE_PAGE,
+  RESOURCE_CODE_PAGES,
+  type DelphiFormResource,
+} from "../../domain/native/delphiForm.js";
 import type {
   InspectPeResourcesInput,
   PeResourceIdentity,
@@ -396,31 +400,6 @@ const readIconGroups = (
       return { resource_index: group.index, images };
     });
 };
-
-/**
- * Windows code page ids that `TextDecoder` can label. A declared page outside
- * this table is reported as unsupported and decoded byte-preservingly.
- */
-const RESOURCE_CODE_PAGES: Readonly<Record<number, string>> = {
-  874: "windows-874",
-  932: "shift_jis",
-  936: "gbk",
-  949: "euc-kr",
-  950: "big5",
-  1200: "utf-16le",
-  1250: "windows-1250",
-  1251: "windows-1251",
-  1252: "windows-1252",
-  1253: "windows-1253",
-  1254: "windows-1254",
-  1255: "windows-1255",
-  1256: "windows-1256",
-  1257: "windows-1257",
-  1258: "windows-1258",
-  65001: "utf-8",
-};
-/** Keeps every byte as one code unit when the declared page cannot be labelled. */
-const BYTE_PRESERVING_CODE_PAGE = "latin1";
 
 /**
  * Decode Delphi/C++Builder binary forms in RT_RCDATA payloads, the way

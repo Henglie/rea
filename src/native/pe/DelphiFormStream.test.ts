@@ -26,6 +26,7 @@ import {
   delphiProperty as property_,
   delphiQWord as qword,
   delphiSet as setOf,
+  delphiShortString as shortString,
   delphiUtf8String as utf8String,
   delphiWideString as wideString,
 } from "./DelphiForm.fixture.js";
@@ -226,6 +227,18 @@ describe("Delphi form property values", () => {
     });
   });
 
+  it("keeps a small extended value that is exactly representable", () => {
+    const raw = Buffer.concat([
+      bytes(5),
+      Buffer.from("0000000000000080013c", "hex"),
+    ]);
+    const root = rootOf(
+      form(component("TForm1", "Form1", [property_("Tiny", raw)])),
+    );
+    const value = propertyOf(root, "Tiny").value;
+    expect(value).toMatchObject({ kind: "float", text: String(2 ** -1022) });
+  });
+
   it("decodes currency and TDateTime without inventing a calendar date", () => {
     const currency = Buffer.alloc(8);
     currency.writeBigInt64LE(12345n, 0);
@@ -320,6 +333,31 @@ describe("Delphi form string and structural values", () => {
     expect(
       propertyOf(rootOf(payload, "windows-1251"), "Caption").value,
     ).toMatchObject({ text: "й", code_page: "windows-1251" });
+  });
+
+  it("keeps every byte when the code page cannot be labelled", () => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32LE(1, 0);
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_("Name", Buffer.concat([bytes(12), length, bytes(0x80)])),
+      ]),
+    );
+    expect(propertyOf(rootOf(payload, "latin1"), "Name").value).toMatchObject({
+      kind: "string",
+      text: "\u0080",
+      code_page: "latin1",
+    });
+  });
+
+  it("rejects a declared string larger than the decode budget", () => {
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_("Blob", lString("a".repeat(900_000))),
+      ]),
+    );
+    const root = rootOf(payload);
+    expect(root.unknown?.reason).toContain("string budget exhausted");
   });
 
   it("decodes binary payloads as binary and caps their hex projection", () => {
@@ -455,7 +493,9 @@ describe("Delphi form failure surface", () => {
       root.children.flatMap((item) => item.class_name?.text ?? []),
     ).not.toContain("TPanel");
   });
+});
 
+describe("Delphi form truncation and limits", () => {
   it("bounds value nesting instead of exhausting the call stack", () => {
     let nested = int32(1);
     for (let level = 0; level < 64; level += 1) nested = list(nested);
@@ -463,6 +503,16 @@ describe("Delphi form failure surface", () => {
       form(component("TForm1", "Form1", [property_("Deep", nested)])),
     );
     expect(root.unknown?.reason).toContain("nesting exceeds");
+  });
+
+  it("bounds component nesting instead of exhausting the call stack", () => {
+    let nested = component("TButton", "Button1");
+    for (let level = 0; level < 40; level += 1)
+      nested = component("TPanel", `Panel${String(level)}`, [], {
+        children: [nested],
+      });
+    const root = rootOf(form(nested));
+    expect(root.unknown?.reason).toContain("object nesting exceeds");
   });
 
   it("charges every retained item against the decode budget", () => {
@@ -534,6 +584,52 @@ describe("Delphi form failure surface", () => {
     expect(property.value.items).toMatchObject([{ kind: "integer" }]);
   });
 
+  it("keeps list entries when the payload ends after a complete item", () => {
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_("Items", Buffer.concat([bytes(1), int32(7)])),
+      ]),
+    );
+    const value = Buffer.from([0x04, 0x07, 0x00, 0x00, 0x00]);
+    const at = payload.indexOf(value);
+    const root = rootOf(payload.subarray(0, at + value.length));
+    const property = root.properties[0];
+    expect(property?.value).toMatchObject({ kind: "list" });
+    if (property?.value.kind !== "list") throw new Error("Expected a list");
+    expect(property.value.items).toMatchObject([
+      { kind: "integer", text: "7" },
+    ]);
+    expect(root.unknown?.reason).toContain("Payload ended");
+  });
+
+  it("keeps a complete class name when the component name is truncated", () => {
+    const payload = form(component("TForm1", "Form1"));
+    const classNameEnd = 4 + 1 + "TForm1".length;
+    const root = rootOf(payload.subarray(0, classNameEnd + 1));
+    expect(root.class_name?.text).toBe("TForm1");
+    expect(root.unknown?.reason).toContain("Payload ended");
+  });
+
+  it("stops ancestors when a property name is truncated", () => {
+    // The unread name bytes are a valid component; resuming there would report
+    // a TPanel that the form never declared.
+    const fake = component("TPanel", "Panel1");
+    const broken = Buffer.concat([
+      shortString("TButton"),
+      shortString("Button1"),
+      bytes(200),
+      fake,
+    ]);
+    const payload = form(
+      component("TForm1", "Form1", [], { children: [broken] }),
+    );
+    const root = rootOf(payload);
+    expect(root.unknown?.reason).toBeDefined();
+    expect(root.children.map((child) => child.class_name?.text)).not.toContain(
+      "TPanel",
+    );
+  });
+
   it("keeps a property name when the type marker itself is truncated", () => {
     const payload = form(
       component("TForm1", "Form1", [property_("Future", int32(7))]),
@@ -545,6 +641,12 @@ describe("Delphi form failure surface", () => {
     expect(root.unknown?.reason).toBeDefined();
     expect(root.properties.at(-1)?.name.text).toBe("Future");
     expect(root.properties.at(-1)?.value_type).toBe("unknown");
+  });
+
+  it("reports a signature-only payload as truncated", () => {
+    const root = rootOf(form(Buffer.alloc(0)));
+    expect(root.class_name).toBeNull();
+    expect(root.unknown?.reason).toContain("without a root component");
   });
 
   it("reports bytes that follow the root component terminator", () => {
@@ -591,5 +693,74 @@ describe("Delphi form partial collections", () => {
     const values = property.value.items[1]?.properties[0];
     expect(values?.name.text).toBe("Values");
     expect(values?.value.kind).toBe("list");
+  });
+
+  it("keeps earlier items when a property name is truncated", () => {
+    // The second item stops inside its property name. The first item and the
+    // observed part of the second item must stay on the collection.
+    // The item marker is followed by a property-name length that exceeds the
+    // remaining bytes, so the failure happens before the name is known.
+    const brokenItem = Buffer.concat([bytes(1, 200), bytes(0x41, 0x42)]);
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_(
+          "Columns",
+          collection(
+            collectionItem(int8(0), property_("Width", int32(64))),
+            brokenItem,
+          ),
+        ),
+      ]),
+    );
+    const root = rootOf(payload);
+    const property = root.properties[0];
+    expect(property?.value.kind).toBe("collection");
+    if (property?.value.kind !== "collection")
+      throw new Error("Expected a collection");
+    expect(property.value.items).toHaveLength(2);
+    expect(property.value.items[0]?.properties[0]?.name.text).toBe("Width");
+  });
+});
+
+describe("Delphi form text budgets and partial sets", () => {
+  it("keeps set names decoded before the payload ends", () => {
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_(
+          "Options",
+          Buffer.concat([
+            bytes(11),
+            shortString("foo"),
+            shortString("bar"),
+            bytes(200),
+          ]),
+        ),
+      ]),
+    );
+    const root = rootOf(payload);
+    const value = propertyOf(root, "Options").value;
+    expect(value.kind).toBe("set");
+    if (value.kind !== "set") throw new Error("Expected a set");
+    expect(value.names.map((name) => name.text)).toEqual(["foo", "bar"]);
+  });
+
+  it("charges short strings against the text budget", () => {
+    // 3,200 maximum-length names exceed the 8 MiB retained-text budget even
+    // though the payload is under 1 MiB.
+    const name = shortString("a".repeat(255));
+    const payload = form(
+      component("TForm1", "Form1", [
+        property_(
+          "Options",
+          Buffer.concat([
+            bytes(11),
+            ...Array.from({ length: 3200 }, () => name),
+            bytes(0),
+          ]),
+        ),
+      ]),
+    );
+    const root = rootOf(payload);
+    expect(root.unknown?.reason).toContain("string budget exhausted");
   });
 });

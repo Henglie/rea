@@ -88,6 +88,8 @@ const HEX_LIMIT_BYTES = 128;
 const MAX_OBJECTS = 1024;
 const MAX_PROPERTIES = 8192;
 const MAX_VALUES = 32768;
+/** Bounds decoded text before allocation; matches the 8 MiB result budget. */
+const MAX_TEXT_BYTES = 8 * 1024 * 1024;
 /** Bounds recursion so a deeply nested value cannot exhaust the call stack. */
 const MAX_DEPTH = 32;
 
@@ -192,6 +194,9 @@ const hexOf = (
 const decodeText = (raw: Buffer, codePage: string): string => {
   if (codePage === "utf-16le") return raw.toString("utf16le");
   if (codePage === "utf-8") return raw.toString("utf8");
+  // `TextDecoder` maps the "latin1" label to Windows-1252, which changes bytes
+  // such as 0x80. Keep the byte-preserving projection for this sentinel.
+  if (codePage === "latin1") return raw.toString("latin1");
   try {
     return new TextDecoder(codePage).decode(raw);
   } catch {
@@ -210,10 +215,11 @@ const decodeExtended = (raw: Buffer): number | null => {
   const exponent = exponentAndSign & 0x7fff;
   if (exponent === 0x7fff) return null;
   if (exponent === 0 && mantissa === 0n) return 0;
-  const sign = (exponentAndSign & 0x8000) === 0 ? 1n : -1n;
-  const scale = Number(BigInt(exponent) - 16383n - 63n);
-  const value = Number(sign * mantissa) * 2 ** scale;
-  return Number.isFinite(value) ? value : null;
+  const sign = (exponentAndSign & 0x8000) === 0 ? 1 : -1;
+  // Normalize the mantissa before applying the exponent. Scaling the full
+  // 64-bit mantissa first underflows for values near the smallest double.
+  const value = (Number(mantissa) / 2 ** 63) * 2 ** (exponent - 16383);
+  return Number.isFinite(value) ? sign * value : null;
 };
 
 /**
@@ -255,7 +261,15 @@ interface Budget {
   objects: number;
   properties: number;
   values: number;
+  text: number;
 }
+
+/** Charge retained text and its hex/JSON projection before decoding it. */
+const spendText = (budget: Budget, projectedBytes: number): void => {
+  budget.text -= projectedBytes;
+  if (budget.text < 0)
+    throw new StreamEnd("Decoded string budget exhausted for this payload.");
+};
 
 const spend = (budget: Budget, field: keyof Budget): void => {
   budget[field] -= 1;
@@ -264,9 +278,16 @@ const spend = (budget: Budget, field: keyof Budget): void => {
 };
 
 /** `ReadStr`: one length byte followed by that many raw bytes. */
-function readShortString(stream: Stream, codePage: string): DelphiFormText {
+function readShortString(
+  stream: Stream,
+  codePage: string,
+  budget: Budget,
+): DelphiFormText {
   const at = stream.position;
   const length = stream.byte();
+  // Short strings are capped at 255 bytes, but a form can retain thousands of
+  // them; charge each one before decoding.
+  spendText(budget, length * 10 + 256);
   const raw = stream.take(length);
   return {
     text: decodeText(raw, codePage),
@@ -424,7 +445,7 @@ function readValue(
       return { kind: "boolean", value: true, location: range(at, at) };
     case 6:
     case 7: {
-      const text = readShortString(stream, codePage);
+      const text = readShortString(stream, codePage, budget);
       return ordinal === 6
         ? {
             kind: "string",
@@ -444,6 +465,8 @@ function readValue(
     case 12:
     case 20: {
       const declared = stream.uint32();
+      // Reject a large declared length before decoding allocates the string.
+      spendText(budget, declared * 10 + 256);
       const raw = stream.take(declared);
       const page = ordinal === 20 ? "utf-8" : codePage;
       return {
@@ -457,6 +480,7 @@ function readValue(
     case 18:
     case 21: {
       const characters = stream.uint32();
+      spendText(budget, characters * 2 * 10 + 256);
       const raw = stream.take(characters * 2);
       return {
         kind: "string",
@@ -480,7 +504,19 @@ function readValue(
       const items: DelphiFormValue[] = [];
       const partialLocation = () => range(at, stream.position);
       for (;;) {
-        const next = stream.peek();
+        let next: number;
+        try {
+          next = stream.peek();
+        } catch (error) {
+          if (!(error instanceof StreamEnd)) throw error;
+          // The payload can end exactly after a complete item; keep every
+          // entry decoded before the missing terminator.
+          throw new StoppedValue(error.message, {
+            kind: "list",
+            items,
+            location: partialLocation(),
+          });
+        }
         if (next === 0) break;
         stream.byte();
         try {
@@ -504,19 +540,44 @@ function readValue(
     case 11: {
       const names: DelphiFormText[] = [];
       for (;;) {
-        // A set name is a retained object even though it costs one input byte,
-        // so charge it against the shared budget before allocating it.
-        spend(budget, "values");
-        const name = readShortString(stream, codePage);
-        if (name.location.bytes <= 1) break;
-        names.push(name);
+        try {
+          // A set name is a retained object even though it costs one input byte,
+          // so charge it against the shared budget before allocating it.
+          spend(budget, "values");
+          const name = readShortString(stream, codePage, budget);
+          if (name.location.bytes <= 1) break;
+          names.push(name);
+        } catch (error) {
+          if (!(error instanceof StreamEnd)) throw error;
+          // Keep the names decoded before the set was truncated.
+          throw new StoppedValue(error.message, {
+            kind: "set",
+            names,
+            location: range(at, stream.position),
+          });
+        }
       }
       return { kind: "set", names, location: range(at, stream.position) };
     }
     case 14: {
       const items: DelphiFormCollectionItem[] = [];
+      function stop(reason: string): never {
+        throw new StoppedValue(reason, {
+          kind: "collection",
+          items,
+          location: range(at, stream.position),
+        });
+      }
       for (;;) {
-        if (stream.peek() === 0) break;
+        let nextItem: number;
+        try {
+          nextItem = stream.peek();
+        } catch (error) {
+          if (!(error instanceof StreamEnd)) throw error;
+          // The payload can end exactly after a complete item; keep it.
+          stop(error.message);
+        }
+        if (nextItem === 0) break;
         // An empty collection item costs two input bytes, so charge every item
         // before it is retained rather than measuring the whole form afterwards.
         spend(budget, "values");
@@ -535,10 +596,36 @@ function readValue(
           );
         const properties: DelphiFormProperty[] = [];
         for (;;) {
-          if (stream.peek() === 0) break;
+          let nextProperty: number;
+          try {
+            nextProperty = stream.peek();
+          } catch (error) {
+            if (!(error instanceof StreamEnd)) throw error;
+            // Keep the item and its properties decoded so far.
+            items.push({
+              position,
+              properties,
+              location: range(itemAt, stream.position),
+            });
+            stop(error.message);
+          }
+          if (nextProperty === 0) break;
           const propertyAt = stream.position;
           spend(budget, "properties");
-          const name = readShortString(stream, codePage);
+          let name: DelphiFormText;
+          try {
+            name = readShortString(stream, codePage, budget);
+          } catch (error) {
+            if (!(error instanceof StreamEnd)) throw error;
+            // The item itself was observed; keep it and every earlier item on
+            // the partial collection instead of collapsing to one unknown.
+            items.push({
+              position,
+              properties,
+              location: range(itemAt, stream.position),
+            });
+            stop(error.message);
+          }
           let ordinal: number | null = null;
           try {
             ordinal = stream.byte();
@@ -620,26 +707,16 @@ function readObject(
   depth: number,
 ): DelphiFormObject {
   spend(budget, "objects");
+  // Nested components recurse like values, so bound them before the call stack.
+  if (depth > MAX_DEPTH)
+    throw new StreamEnd(
+      `Delphi form object nesting exceeds ${String(MAX_DEPTH)} levels.`,
+    );
   const at = stream.position;
   const flags: string[] = [];
   let childPosition: string | null = null;
-  const prefix = stream.peek();
-  if ((prefix & 0xf0) === 0xf0) {
-    stream.byte();
-    for (const [bit, name] of FILER_FLAGS.entries())
-      if ((prefix & (1 << bit)) !== 0) flags.push(name);
-    if ((prefix & 0x02) !== 0) {
-      const width = stream.byte();
-      if (width !== 2 && width !== 3 && width !== 4)
-        throw new StreamEnd("Child position is not encoded as vaInt8/16/32.");
-      childPosition = readInteger(
-        stream,
-        width === 2 ? 8 : width === 3 ? 16 : 32,
-      );
-    }
-  }
-  const className = readShortString(stream, codePage);
-  const componentName = readShortString(stream, codePage);
+  let className: DelphiFormText | null = null;
+  let componentName: DelphiFormText | null = null;
   const properties: DelphiFormProperty[] = [];
   const children: DelphiFormObject[] = [];
   const partial = (reason: string): DelphiFormObject => ({
@@ -656,11 +733,36 @@ function readObject(
     },
   });
   try {
+    const prefix = stream.peek();
+    if ((prefix & 0xf0) === 0xf0) {
+      stream.byte();
+      for (const [bit, name] of FILER_FLAGS.entries())
+        if ((prefix & (1 << bit)) !== 0) flags.push(name);
+      if ((prefix & 0x02) !== 0) {
+        const width = stream.byte();
+        if (width !== 2 && width !== 3 && width !== 4)
+          throw new StreamEnd("Child position is not encoded as vaInt8/16/32.");
+        childPosition = readInteger(
+          stream,
+          width === 2 ? 8 : width === 3 ? 16 : 32,
+        );
+      }
+    }
+    // Keep a complete class name when the component name is truncated, and stop
+    // every ancestor: resuming at the unread name bytes would invent siblings.
+    className = readShortString(stream, codePage, budget);
+    componentName = readShortString(stream, codePage, budget);
+  } catch (error) {
+    if (error instanceof StoppedForm) throw error;
+    if (!(error instanceof StreamEnd)) throw error;
+    throw new StoppedForm(partial(error.message));
+  }
+  try {
     for (;;) {
       if (stream.peek() === 0) break;
       const propertyAt = stream.position;
       spend(budget, "properties");
-      const name = readShortString(stream, codePage);
+      const name = readShortString(stream, codePage, budget);
       // The type marker can itself be truncated after a complete name; the
       // partial-property path below must still retain the observed name.
       let ordinal: number | null = null;
@@ -737,7 +839,7 @@ function readObject(
   } catch (error) {
     if (error instanceof StoppedForm) throw error;
     if (!(error instanceof StreamEnd)) throw error;
-    return partial(error.message);
+    throw new StoppedForm(partial(error.message));
   }
   return {
     location: range(at, stream.position),
@@ -772,6 +874,7 @@ export const decodeDelphiFormStream = (
     objects: MAX_OBJECTS,
     properties: MAX_PROPERTIES,
     values: MAX_VALUES,
+    text: MAX_TEXT_BYTES,
   };
   const stream = new Stream(
     bytes,
@@ -781,6 +884,23 @@ export const decodeDelphiFormStream = (
   let root: DelphiFormObject | null = null;
   try {
     if (stream.remaining > 0) root = readObject(stream, budget, codePage, 0);
+    else
+      // A filer stream must contain a root component; report the payload as
+      // truncated instead of presenting an intentionally empty form.
+      root = {
+        location: range(stream.position, end),
+        flags: [],
+        child_position: null,
+        class_name: null,
+        component_name: null,
+        properties: [],
+        children: [],
+        unknown: {
+          reason:
+            "Payload ends after the filer signature without a root component.",
+          bytes_hex: "",
+        },
+      };
     // A suffix after the root terminator is part of the payload but nothing
     // decoded claims it; report it instead of presenting a complete decode.
     if (root !== null && root.unknown === null && stream.remaining > 0)
